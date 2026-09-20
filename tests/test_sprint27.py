@@ -92,12 +92,12 @@ def test_settings_whitespace_bot_name_defaults_to_hermes():
 
 # ── Login page rendering ──────────────────────────────────────────────────
 
-def test_login_page_shows_default_bot_name():
-    """GET /login should contain 'Hermes' in title and h1 when default."""
+def test_login_page_shows_app_brand():
+    """GET /login should show the ai-nest app brand in title and h1."""
     html, status = get_raw("/login")
     assert status == 200
-    assert "<title>Hermes" in html
-    assert "<h1>Hermes</h1>" in html
+    assert "<title>ai-nest" in html
+    assert "<h1>ai-nest</h1>" in html
 
 
 def test_login_page_shows_custom_bot_name():

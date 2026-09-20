@@ -11048,17 +11048,17 @@ def _resolve_login_locale_key(raw_lang: str | None) -> str:
 # ── Login page (self-contained, no external deps) ────────────────────────────
 _LOGIN_PAGE_HTML = """<!doctype html>
 <html lang="{{LANG}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{BOT_NAME}} — {{LOGIN_TITLE}}</title>
+<title>ai-nest — {{LOGIN_TITLE}}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#1a1a2e;color:#e8e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
   height:100vh;display:flex;align-items:center;justify-content:center}
 .card{background:#16213e;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:36px 32px;
   width:320px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.3)}
-.logo{width:48px;height:48px;border-radius:12px;background:linear-gradient(145deg,#e8a030,#e94560);
-  display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;color:#fff;
-  margin:0 auto 12px;box-shadow:0 2px 12px rgba(233,69,96,.3)}
+.logo{width:48px;height:48px;border-radius:12px;margin:0 auto 12px;overflow:hidden}
+.logo img{width:48px;height:48px;display:block}
 h1{font-size:18px;font-weight:600;margin-bottom:4px}
+.tagline{font-size:12px;color:#8888aa;margin-bottom:18px}
 .sub{font-size:12px;color:#8888aa;margin-bottom:24px}
 input{width:100%;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.1);
   background:rgba(255,255,255,.04);color:#e8e8f0;font-size:14px;outline:none;margin-bottom:14px;
@@ -11076,8 +11076,9 @@ button:hover{background:rgba(124,185,255,.25)}
 .err{color:#e94560;font-size:12px;margin-top:10px;display:none}
 </style></head><body>
 <div class="card">
-  <div class="logo">{{BOT_NAME_INITIAL}}</div>
-  <h1>{{BOT_NAME}}</h1>
+  <div class="logo"><img src="static/apple-touch-icon.png" alt="ai-nest" width="48" height="48"></div>
+  <h1>ai-nest</h1>
+  <p class="tagline">the home where your personal AI settles</p>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
     <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
