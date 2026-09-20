@@ -100,14 +100,16 @@ def test_login_page_shows_app_brand():
     assert "<h1>ai-nest</h1>" in html
 
 
-def test_login_page_shows_custom_bot_name():
-    """GET /login should reflect the configured bot_name."""
+def test_login_page_ignores_bot_name():
+    """GET /login shows the ai-nest app brand, not the configured bot_name."""
     try:
         post("/api/settings", {"bot_name": "Aria"})
         html, status = get_raw("/login")
         assert status == 200
-        assert "<title>Aria" in html
-        assert "<h1>Aria</h1>" in html
+        assert "<title>ai-nest" in html
+        assert "<h1>ai-nest</h1>" in html
+        # bot_name is the in-app assistant name; it must not leak onto the login page
+        assert "<h1>Aria</h1>" not in html
     finally:
         post("/api/settings", {"bot_name": "Hermes"})
 
@@ -122,15 +124,15 @@ def test_login_page_empty_name_does_not_crash():
     assert "Sign in" in html
 
 
-def test_login_page_xss_escaped():
-    """bot_name with HTML special chars should be escaped in the login page."""
+def test_login_page_not_injected_by_bot_name():
+    """A malicious bot_name must not reach the login page (it's not rendered there)."""
     try:
         post("/api/settings", {"bot_name": "<script>alert(1)</script>"})
         html, status = get_raw("/login")
         assert status == 200
-        # Raw tag must not appear unescaped
+        # bot_name is not rendered on the login page, so neither raw nor escaped form appears
         assert "<script>alert(1)</script>" not in html
-        # Escaped form should appear
-        assert "&lt;script&gt;" in html
+        assert "&lt;script&gt;" not in html
+        assert "<h1>ai-nest</h1>" in html
     finally:
         post("/api/settings", {"bot_name": "Hermes"})
