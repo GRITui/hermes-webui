@@ -571,3 +571,123 @@ def test_insights_top_sessions_titles_are_redacted(monkeypatch, tmp_path):
     for t in titles:
         assert secret not in t, "secret-bearing title leaked unredacted"
 
+
+# ── #7661 remaining: text ts, cross-store dedup, zero-token, latest-activity ──
+def _call_insights_state_db_schema(monkeypatch, tmp_path, entries, rows, schema, days="7", now=None):
+    """Seed a state.db with a CUSTOM sessions schema (for legacy/partial tables)."""
+    import sqlite3
+    import api.routes as routes
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / "_index.json").write_text(json.dumps(entries), encoding="utf-8")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    if now is not None:
+        monkeypatch.setattr(time, "time", lambda: now)
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(schema)
+    for r in rows:
+        cols = list(r.keys())
+        conn.execute(
+            f"INSERT INTO sessions ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+            [r[c] for c in cols],
+        )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+    handler = _FakeHandler()
+    parsed = SimpleNamespace(query=f"days={days}")
+    routes._handle_insights(handler, parsed)
+    assert handler.status == 200
+    return handler.json_body()
+
+
+def test_insights_text_timestamps_do_not_500(monkeypatch, tmp_path):
+    """Legacy state.db rows store text timestamps; sorting must not 500 the endpoint."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    iso = "2026-05-30T12:00:00"
+    schema = (
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, "
+        "message_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+        "estimated_cost_usd REAL, started_at TEXT, ended_at TEXT)"
+    )
+    rows = [{"id": "txt1", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+             "input_tokens": 100, "output_tokens": 10, "estimated_cost_usd": 0.01,
+             "started_at": iso, "ended_at": iso}]
+    data = _call_insights_state_db_schema(monkeypatch, tmp_path, [], rows, schema, days="7", now=now)
+    # Endpoint survived (no 500) and the text-ts session is ranked with a numeric ts.
+    assert any(s["id"] == "txt1" for s in data["top_sessions"])
+    ts = next(s["ts"] for s in data["top_sessions"] if s["id"] == "txt1")
+    assert isinstance(ts, (int, float)) and ts > 0
+
+
+def test_insights_top_sessions_dedup_across_stores(monkeypatch, tmp_path):
+    """A session present in both _index.json and state.db occupies one slot, not two."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    webui_entries = [
+        {"session_id": "dup", "updated_at": now, "created_at": now, "message_count": 1,
+         "input_tokens": 100, "output_tokens": 50, "estimated_cost": 0.01, "model": "gpt-5.5",
+         "title": "shared session"},
+    ]
+    # Same id in state.db but source='cli' (so the second pass does NOT skip it).
+    state_rows = [
+        {"id": "dup", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 100, "output_tokens": 50, "estimated_cost_usd": 0.01,
+         "started_at": now, "ended_at": now},
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, webui_entries, state_rows, days="7", now=now)
+    ids = [s["id"] for s in data["top_sessions"]]
+    assert ids.count("dup") == 1, f"session 'dup' ranked twice: {ids}"
+
+
+def test_insights_top_sessions_omits_zero_token(monkeypatch, tmp_path):
+    """Zero-token sessions are counted in totals but not ranked in top_sessions."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "busy", "updated_at": now, "created_at": now, "message_count": 1,
+         "input_tokens": 500, "output_tokens": 50, "estimated_cost": 0.05, "model": "gpt-5.5"},
+        {"session_id": "idle", "updated_at": now, "created_at": now, "message_count": 1,
+         "input_tokens": 0, "output_tokens": 0, "estimated_cost": 0.0, "model": "gpt-5.5"},
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+    ids = {s["id"] for s in data["top_sessions"]}
+    assert "busy" in ids
+    assert "idle" not in ids, "zero-token session should be omitted from top_sessions"
+    assert data["total_sessions"] == 2  # still counted in the aggregate
+
+
+def test_insights_top_sessions_rank_by_latest_activity(monkeypatch, tmp_path):
+    """A long-running session ranks by ended_at (latest activity), not started_at."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    old_start = now - (6 * 86400)
+    rows = [
+        # Started long ago but ended recently -> should rank first (tie on tokens).
+        {"id": "long", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 100, "output_tokens": 0, "estimated_cost_usd": 0.01,
+         "started_at": old_start, "ended_at": now},
+        # Started more recently but ended earlier -> should rank second.
+        {"id": "short", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 100, "output_tokens": 0, "estimated_cost_usd": 0.01,
+         "started_at": now - (3 * 86400), "ended_at": now - (3 * 86400)},
+    ]
+    data = _call_insights_state_db_schema(
+        monkeypatch, tmp_path, [], rows,
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, "
+        "message_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+        "estimated_cost_usd REAL, started_at REAL, ended_at REAL)",
+        days="7", now=now,
+    )
+    order = [s["id"] for s in data["top_sessions"]]
+    assert order.index("long") < order.index("short"), f"expected 'long' before 'short': {order}"
+
+
+def test_insights_top_sessions_table_has_contained_overflow():
+    """The top-sessions table scrolls inside its card instead of overflowing the panel."""
+    assert "insights-top-sessions-table" in PANELS_JS
+    assert ".insights-top-sessions-table{overflow-x:auto;display:block;}" in STYLE_CSS
+    assert "min-width:420px" in STYLE_CSS
+

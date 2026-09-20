@@ -11773,6 +11773,8 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
 def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
+    import datetime as _dt
+    import math
     import time as _time
 
     from api.usage import prompt_cache_hit_percent
@@ -11810,6 +11812,30 @@ def _handle_insights(handler, parsed) -> bool:
 
     def _session_usage_ts(session: dict) -> float:
         return session.get("updated_at", session.get("created_at", 0)) or session.get("created_at", 0) or 0
+
+    def _safe_ts(value) -> float:
+        """Normalize a timestamp to a finite numeric epoch (0.0 when unusable).
+
+        Older state.db rows store text timestamps; sorting applies unary `-` to
+        the raw value, so a str would 500 the whole endpoint.
+        """
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value) if math.isfinite(value) else 0.0
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return 0.0
+            try:
+                return float(s)
+            except ValueError:
+                pass
+            try:
+                return _dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return 0.0
+        return 0.0
 
     # Resolve the request profile once and scope every index row to it.
     # _index.json is GLOBAL (every profile on the box); without this filter the
@@ -11929,45 +11955,33 @@ def _handle_insights(handler, parsed) -> bool:
             with closing(sqlite3.connect(str(db_path))) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
-                # cache_read_tokens may not exist on older agent state DBs;
-                # fall back to a query without it if the column is missing.
-                try:
-                    cur.execute("""
-                        SELECT id, title, model, message_count, input_tokens, output_tokens,
-                               estimated_cost_usd,
-                               COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-                               started_at, ended_at
-                        FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
-                          AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
-                except sqlite3.OperationalError:
-                    try:
-                        cur.execute("""
-                            SELECT id, title, model, message_count, input_tokens, output_tokens,
-                                   estimated_cost_usd,
-                                   0 AS cache_read_tokens,
-                                   started_at, ended_at
-                            FROM sessions
-                            WHERE (started_at >= ? OR ended_at >= ?)
-                              AND COALESCE(source, '') != 'webui'
-                        """, (cutoff, cutoff))
-                    except sqlite3.OperationalError:
-                        cur.execute("""
-                            SELECT id, NULL AS title, model, message_count, input_tokens, output_tokens,
-                                   estimated_cost_usd,
-                                   0 AS cache_read_tokens,
-                                   started_at, ended_at
-                            FROM sessions
-                            WHERE (started_at >= ? OR ended_at >= ?)
-                              AND COALESCE(source, '') != 'webui'
-                        """, (cutoff, cutoff))
+                # Detect optional columns per-schema instead of exception-driven
+                # fallback: a partially-migrated table (e.g. title present but
+                # cache_read_tokens absent) degrades predictably instead of
+                # relying on which query throws first.
+                cur.execute("PRAGMA table_info(sessions)")
+                _cols = {r[1] for r in cur.fetchall()}
+                _title_expr = "title" if "title" in _cols else "NULL AS title"
+                _cache_expr = ("COALESCE(cache_read_tokens, 0) AS cache_read_tokens"
+                               if "cache_read_tokens" in _cols else "0 AS cache_read_tokens")
+                cur.execute(f"""
+                    SELECT id, {_title_expr}, model, message_count, input_tokens, output_tokens,
+                           estimated_cost_usd,
+                           {_cache_expr},
+                           started_at, ended_at
+                    FROM sessions
+                    WHERE (started_at >= ? OR ended_at >= ?)
+                      AND COALESCE(source, '') != 'webui'
+                """, (cutoff, cutoff))
                 for row in cur.fetchall():
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])
                     _cache_read = _safe_usage_int(row["cache_read_tokens"])
                     _cost = _safe_cost_float(row["estimated_cost_usd"])
                     _msgs = _safe_usage_int(row["message_count"])
+                    # Latest activity (ended_at preferred over started_at) so a
+                    # long-running session ranks by recency, not by start time.
+                    _ts = max(_safe_ts(row["ended_at"]), _safe_ts(row["started_at"]))
                     total_sessions += 1
                     total_messages += _msgs
                     total_input_tokens += _input
@@ -11996,10 +12010,9 @@ def _handle_insights(handler, parsed) -> bool:
                         "output_tokens": _output,
                         "total_tokens": _input + _output,
                         "cost": _cost,
-                        "ts": row["started_at"] or row["ended_at"] or 0,
+                        "ts": _ts,
                     })
 
-                    _ts = row["started_at"] or row["ended_at"] or 0
                     if _ts:
                         _dt = _time.localtime(_ts)
                         _day_key = _time.strftime("%Y-%m-%d", _dt)
@@ -12051,6 +12064,29 @@ def _handle_insights(handler, parsed) -> bool:
     models_breakdown.sort(key=lambda r: (-r["cost"], -r["sessions"], r["model"]))
 
     # Top sessions by tokens (tie-break: cost, then most recent).
+    # Deduplicate by non-empty session ID so a session present in both the WebUI
+    # index and state.db occupies one ranking slot, not two. The first store seen
+    # (WebUI index) is the base; a duplicate's title/model fill in only if the
+    # base is missing them. ID-less rows stay distinct. Zero-token candidates are
+    # omitted rather than ranked.
+    _deduped: dict[str, dict] = {}
+    _no_id: list[dict] = []
+    for r in session_rows:
+        if r["total_tokens"] <= 0:
+            continue
+        rid = r["id"]
+        if not rid:
+            _no_id.append(r)
+            continue
+        base = _deduped.get(rid)
+        if base is None:
+            _deduped[rid] = r
+        else:
+            if not base["title"] and r["title"]:
+                base["title"] = r["title"]
+            if (not base["model"] or base["model"] == "unknown") and r["model"] not in ("", "unknown"):
+                base["model"] = r["model"]
+    _ranked = list(_deduped.values()) + _no_id
     top_sessions = [
         {
             "id": r["id"],
@@ -12063,7 +12099,7 @@ def _handle_insights(handler, parsed) -> bool:
             "ts": r["ts"],
             "token_share": int(round((r["total_tokens"] / total_tokens) * 100)) if total_tokens else 0,
         }
-        for r in sorted(session_rows, key=lambda r: (-r["total_tokens"], -r["cost"], -r["ts"]))[:10]
+        for r in sorted(_ranked, key=lambda r: (-r["total_tokens"], -r["cost"], -r["ts"]))[:10]
     ]
 
     daily_series = []
