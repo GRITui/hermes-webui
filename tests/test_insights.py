@@ -516,3 +516,58 @@ def test_insights_cache_hit_rate_is_none_without_cache_reads(monkeypatch, tmp_pa
     assert data["models"][0]["cache_hit_percent"] is None
     assert data["total_cache_hit_percent"] is None
 
+
+# ── #7661 CORE: cross-profile isolation + title redaction on top_sessions ──
+def test_insights_top_sessions_isolated_by_profile(monkeypatch, tmp_path):
+    """_index.json is GLOBAL; the card must not rank or leak other profiles' sessions.
+
+    Reproduces the cross-tenant disclosure: profile 'alpha' must not receive
+    profile 'beta''s session title/ID, and foreign rows must not inflate totals.
+    """
+    import api.routes as routes
+
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"session_id": "mine", "profile": "alpha", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 100, "output_tokens": 10,
+         "estimated_cost": 0.01, "model": "gpt-5.5", "title": "my session"},
+        {"session_id": "theirs", "profile": "beta", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 9999, "output_tokens": 999,
+         "estimated_cost": 0.99, "model": "gpt-5.5", "title": "beta secret session"},
+    ]
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "alpha")
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+
+    ids = {s["id"] for s in data["top_sessions"]}
+    assert "mine" in ids
+    assert "theirs" not in ids, "foreign-profile session leaked into top_sessions"
+    # Foreign row must not inflate the aggregates either.
+    assert data["total_input_tokens"] == 100
+    assert data["total_sessions"] == 1
+    assert "beta secret session" not in json.dumps(data)
+
+
+def test_insights_top_sessions_titles_are_redacted(monkeypatch, tmp_path):
+    """top_sessions titles pass through _redact_text when api_redact_enabled is on.
+
+    Session titles are auto-derived from first messages, so a pasted API key
+    must not be returned raw from /api/insights.
+    """
+    import api.routes as routes
+
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    secret = "sk-TestCredential1234567890"
+    entries = [
+        {"session_id": "s1", "updated_at": now, "created_at": now,
+         "message_count": 1, "input_tokens": 100, "output_tokens": 10,
+         "estimated_cost": 0.01, "model": "gpt-5.5",
+         "title": f"please use {secret} now"},
+    ]
+    monkeypatch.setattr(routes, "load_settings", lambda: {"api_redact_enabled": True})
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+
+    titles = [s["title"] for s in data["top_sessions"]]
+    assert titles, "expected at least one top session"
+    for t in titles:
+        assert secret not in t, "secret-bearing title leaked unredacted"
+

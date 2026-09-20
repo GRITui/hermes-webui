@@ -11811,6 +11811,19 @@ def _handle_insights(handler, parsed) -> bool:
     def _session_usage_ts(session: dict) -> float:
         return session.get("updated_at", session.get("created_at", 0)) or session.get("created_at", 0) or 0
 
+    # Resolve the request profile once and scope every index row to it.
+    # _index.json is GLOBAL (every profile on the box); without this filter the
+    # card ranks and prints other profiles' session titles/IDs — a cross-tenant
+    # disclosure. _profiles_match coerces None/'' -> 'default', so legacy
+    # profile-less rows still surface on the root profile.
+    active_profile = _get_active_profile_name()
+    # Read the redaction setting ONCE and fail closed: titles are auto-derived
+    # from first messages, so a pasted API key would otherwise leak raw here.
+    try:
+        redact_enabled = bool(load_settings().get("api_redact_enabled", True))
+    except Exception:
+        redact_enabled = True
+
     # Walk session index (fast, no full JSON parse)
     sessions_data = []
     idx_path = SESSION_DIR / "_index.json"
@@ -11823,6 +11836,10 @@ def _handle_insights(handler, parsed) -> bool:
         idx = []
 
     for entry in idx:
+        # Profile isolation: drop foreign-profile rows BEFORE aggregation so
+        # they never reach the totals, the model breakdown, or top_sessions.
+        if not _profiles_match(entry.get("profile"), active_profile):
+            continue
         created = entry.get("created_at", 0) or 0
         updated = entry.get("updated_at", 0) or 0
         # Session is relevant if it was created or updated within the calendar window.
@@ -12037,7 +12054,7 @@ def _handle_insights(handler, parsed) -> bool:
     top_sessions = [
         {
             "id": r["id"],
-            "title": r["title"],
+            "title": _redact_text(r["title"], _enabled=redact_enabled) if isinstance(r["title"], str) else r["title"],
             "model": r["model"],
             "input_tokens": r["input_tokens"],
             "output_tokens": r["output_tokens"],
