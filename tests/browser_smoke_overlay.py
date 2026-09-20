@@ -70,7 +70,7 @@ def main():
     state_dir = tempfile.mkdtemp(prefix="hermes-overlay-smoke-")
     env = os.environ.copy()
     for k in list(env):
-        if k.endswith("_API_KEY"):
+        if k.endswith("_API_KEY") or k == "HERMES_WEBUI_PASSWORD":
             env.pop(k, None)
     env.update({
         "HERMES_WEBUI_PORT": str(PORT),
@@ -141,10 +141,11 @@ def main():
             if not st["panelMobileOpen"]:
                 failures.append("phone: panel NOT mobile-open after opening")
 
-            page.evaluate("""() => {
-                const o = document.getElementById('mobileRightpanelOverlay');
-                if (o) o.click();
-            }""")
+            # Real pointer click on the scrim (left edge; the 300px panel
+            # occupies the right side of the 390px viewport). page.mouse.click
+            # goes through browser hit-testing, so a stacking/geometry/pointer
+            # regression that makes the scrim untappable fails this test.
+            page.mouse.click(45, 400)
             page.wait_for_timeout(400)
             st = page.evaluate("""() => {
                 const o = document.getElementById('mobileRightpanelOverlay');
@@ -173,6 +174,8 @@ def main():
                 const o = document.getElementById('mobileRightpanelOverlay');
                 const p = document.querySelector('.rightpanel');
                 return {
+                    mode: typeof _workspacePanelMode!=='undefined'?_workspacePanelMode:'undef',
+                    defaultWs: S?S._profileDefaultWorkspace:null,
                     overlayVisible: o ? o.classList.contains('visible') : null,
                     panelMobileOpen: p ? p.classList.contains('mobile-open') : null,
                 };
@@ -182,6 +185,26 @@ def main():
                 failures.append("desktop: overlay visible but should be hidden at desktop width")
             if st["panelMobileOpen"]:
                 failures.append("desktop: panel mobile-open but should be a normal column")
+
+            # ---- RESIZE: desktop -> phone with panel open (P1 regression) ----
+            # Resizing an open panel to phone width must turn it into a
+            # slide-over WITH the scrim, not leave it off-screen and
+            # undismissable.
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.wait_for_timeout(600)
+            st = page.evaluate("""() => {
+                const o = document.getElementById('mobileRightpanelOverlay');
+                const p = document.querySelector('.rightpanel');
+                return {
+                    overlayVisible: o ? o.classList.contains('visible') : null,
+                    panelMobileOpen: p ? p.classList.contains('mobile-open') : null,
+                };
+            }""")
+            print("phone after resize:", st)
+            if not st["panelMobileOpen"]:
+                failures.append("resize: panel not mobile-open after desktop->phone resize")
+            if not st["overlayVisible"]:
+                failures.append("resize: overlay not visible after desktop->phone resize")
 
             ctx.close()
             browser.close()
