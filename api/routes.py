@@ -11843,6 +11843,8 @@ def _handle_insights(handler, parsed) -> bool:
     dow_activity = collections.Counter()
     # Activity by hour of day (0-23)
     hod_activity = collections.Counter()
+    # Per-session rows for the "Top sessions" card (ranked by tokens).
+    session_rows = []
 
     for s in sessions_data:
         input_tokens = _safe_usage_int(s.get("input_tokens"))
@@ -11868,6 +11870,16 @@ def _handle_insights(handler, parsed) -> bool:
         bucket["output_tokens"] += output_tokens
         bucket["cache_read_tokens"] += cache_read_tokens
         bucket["cost"] += cost_value
+        session_rows.append({
+            "id": s.get("session_id") or s.get("id") or "",
+            "title": s.get("title") or "",
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "cost": cost_value,
+            "ts": _session_usage_ts(s),
+        })
 
         # Activity patterns
         ts = _session_usage_ts(s)
@@ -11904,7 +11916,7 @@ def _handle_insights(handler, parsed) -> bool:
                 # fall back to a query without it if the column is missing.
                 try:
                     cur.execute("""
-                        SELECT id, model, message_count, input_tokens, output_tokens,
+                        SELECT id, title, model, message_count, input_tokens, output_tokens,
                                estimated_cost_usd,
                                COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
                                started_at, ended_at
@@ -11913,15 +11925,26 @@ def _handle_insights(handler, parsed) -> bool:
                           AND COALESCE(source, '') != 'webui'
                     """, (cutoff, cutoff))
                 except sqlite3.OperationalError:
-                    cur.execute("""
-                        SELECT id, model, message_count, input_tokens, output_tokens,
-                               estimated_cost_usd,
-                               0 AS cache_read_tokens,
-                               started_at, ended_at
-                        FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
-                          AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
+                    try:
+                        cur.execute("""
+                            SELECT id, title, model, message_count, input_tokens, output_tokens,
+                                   estimated_cost_usd,
+                                   0 AS cache_read_tokens,
+                                   started_at, ended_at
+                            FROM sessions
+                            WHERE (started_at >= ? OR ended_at >= ?)
+                              AND COALESCE(source, '') != 'webui'
+                        """, (cutoff, cutoff))
+                    except sqlite3.OperationalError:
+                        cur.execute("""
+                            SELECT id, NULL AS title, model, message_count, input_tokens, output_tokens,
+                                   estimated_cost_usd,
+                                   0 AS cache_read_tokens,
+                                   started_at, ended_at
+                            FROM sessions
+                            WHERE (started_at >= ? OR ended_at >= ?)
+                              AND COALESCE(source, '') != 'webui'
+                        """, (cutoff, cutoff))
                 for row in cur.fetchall():
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])
@@ -11948,6 +11971,16 @@ def _handle_insights(handler, parsed) -> bool:
                     bucket["output_tokens"] += _output
                     bucket["cache_read_tokens"] += _cache_read
                     bucket["cost"] += _cost
+                    session_rows.append({
+                        "id": row["id"] or "",
+                        "title": row["title"] or "",
+                        "model": _model,
+                        "input_tokens": _input,
+                        "output_tokens": _output,
+                        "total_tokens": _input + _output,
+                        "cost": _cost,
+                        "ts": row["started_at"] or row["ended_at"] or 0,
+                    })
 
                     _ts = row["started_at"] or row["ended_at"] or 0
                     if _ts:
@@ -12000,6 +12033,22 @@ def _handle_insights(handler, parsed) -> bool:
         })
     models_breakdown.sort(key=lambda r: (-r["cost"], -r["sessions"], r["model"]))
 
+    # Top sessions by tokens (tie-break: cost, then most recent).
+    top_sessions = [
+        {
+            "id": r["id"],
+            "title": r["title"],
+            "model": r["model"],
+            "input_tokens": r["input_tokens"],
+            "output_tokens": r["output_tokens"],
+            "total_tokens": r["total_tokens"],
+            "cost": round(r["cost"], 6),
+            "ts": r["ts"],
+            "token_share": int(round((r["total_tokens"] / total_tokens) * 100)) if total_tokens else 0,
+        }
+        for r in sorted(session_rows, key=lambda r: (-r["total_tokens"], -r["cost"], -r["ts"]))[:10]
+    ]
+
     daily_series = []
     for i in range(days):
         day_ts = first_day_ts + (i * day_secs)
@@ -12042,6 +12091,7 @@ def _handle_insights(handler, parsed) -> bool:
         "total_tokens": total_tokens,
         "total_cost": round(total_cost, 6),
         "models": models_breakdown,
+        "top_sessions": top_sessions,
         "daily_tokens": daily_series,
         "activity_by_day": dow_data,
         "activity_by_hour": hod_data,
