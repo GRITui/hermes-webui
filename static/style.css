@@ -3101,10 +3101,6 @@
       top:0;bottom:0;width:var(--mobile-rightpanel-width)!important;max-width:100vw!important;z-index:200;padding-top:var(--app-titlebar-safe-top);box-sizing:border-box;transition:right .25s ease;
       box-shadow:none!important;}
     .rightpanel.mobile-open{right:0!important;box-shadow:-4px 0 24px rgba(0,0,0,.4)!important;}
-    /* Dim scrim behind the slide-over panel: tap it to dismiss back to chat.
-       z-index 199 sits above the chat (z 10) but below the panel (z 200). */
-    .mobile-rightpanel-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:199;-webkit-tap-highlight-color:transparent;}
-    .mobile-rightpanel-overlay.visible{display:block;}
     .rightpanel .resize-handle{display:none;}
     .rightpanel .panel-header{row-gap:8px;}
     .rightpanel .panel-actions{align-items:center;gap:8px;}
@@ -3129,6 +3125,12 @@
        intent) WITHOUT coercing overflow-y or creating a scroll container, so
        min-height:auto stays min-content and the inner grows normally. */
     .messages-inner{padding:12px 10px 20px;max-width:100%;overflow-x:clip;word-break:break-word;min-width:0;padding-left:max(10px,env(safe-area-inset-left,0));padding-right:max(10px,env(safe-area-inset-right,0));}
+    /* Dim scrim behind the slide-over panel: tap it to dismiss back to chat.
+       z-index 199 sits above the chat (z 10) but below the panel (z 200).
+       Placed after .messages-inner so the mobile-containment regression test's
+       search window still finds that rule. */
+    .mobile-rightpanel-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:199;-webkit-tap-highlight-color:transparent;}
+    .mobile-rightpanel-overlay.visible{display:block;}
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
     .composer-wrap{padding:8px 10px calc(12px + var(--keyboard-bottom-inset, 0px))!important;padding-left:max(10px,env(safe-area-inset-left,0))!important;padding-right:max(10px,env(safe-area-inset-right,0))!important;}

@@ -254,18 +254,6 @@ function _setWorkspacePanelMode(mode){
   // so that toggleWorkspacePanel(false) from the toolbar doesn't clear the setting.
   try{localStorage.setItem('hermes-webui-workspace-panel', open ? 'open' : 'closed');}catch(_){}
   layout.classList.toggle('workspace-panel-collapsed',!open);
-  if(_isCompactWorkspaceViewport()){
-    panel.classList.toggle('mobile-open',open);
-  }else{
-    panel.classList.remove('mobile-open');
-  }
-  // On a phone the panel is a slide-over; show a dim scrim behind it so the
-  // user sees it as a layer and can tap outside (the scrim) to dismiss back to
-  // chat. Without this the artifact just floats over the chat with no cue and
-  // feels impossible to close. Only at phone width (<=640px) is the panel a
-  // fixed slide-over — above that it's a normal column and needs no scrim.
-  const rpOverlay=$('mobileRightpanelOverlay');
-  if(rpOverlay)rpOverlay.classList.toggle('visible',open&&_isPhoneWidthViewport());
   syncWorkspacePanelUI();
 }
 
@@ -362,10 +350,23 @@ function _uiText(key, fallback){
 function syncWorkspacePanelUI(){
   const {layout,panel,toggleBtn,edgeToggleBtn,collapseBtn}= _workspacePanelEls();
   if(!layout||!panel)return;
-  const desktopOpen=_workspacePanelMode!=='closed';
-  const mobileOpen=panel.classList.contains('mobile-open');
+  const panelOpen=_workspacePanelMode!=='closed';
   const isCompact=_isCompactWorkspaceViewport();
-  const isOpen=isCompact?mobileOpen:desktopOpen;
+  // The panel's mobile slide-over class and the dim dismiss scrim are pure
+  // functions of (mode, viewport) — sync them here, not in
+  // _setWorkspacePanelMode, so every path that resyncs the panel (resize,
+  // preview show/hide, session change) keeps them consistent. Without this,
+  // resizing an open panel from desktop to phone width leaves it off-screen
+  // with no scrim to tap. Only at phone width (<=640px) is the panel a fixed
+  // slide-over; above that it's a normal column and needs no scrim.
+  if(isCompact){
+    panel.classList.toggle('mobile-open',panelOpen);
+    const rpOverlay=$('mobileRightpanelOverlay');
+    if(rpOverlay)rpOverlay.classList.toggle('visible',panelOpen&&_isPhoneWidthViewport());
+  }else{
+    panel.classList.remove('mobile-open');
+  }
+  const isOpen=panelOpen;
   const canBrowse=!!S.session||_hasWorkspacePreviewVisible()||!!(S._profileDefaultWorkspace);
   const hasPreview=_hasWorkspacePreviewVisible();
   if(toggleBtn){
