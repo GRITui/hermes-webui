@@ -11970,9 +11970,8 @@ def _handle_insights(handler, parsed) -> bool:
                            {_cache_expr},
                            started_at, ended_at
                     FROM sessions
-                    WHERE (started_at >= ? OR ended_at >= ?)
-                      AND COALESCE(source, '') != 'webui'
-                """, (cutoff, cutoff))
+                    WHERE COALESCE(source, '') != 'webui'
+                """)
                 for row in cur.fetchall():
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])
@@ -11982,6 +11981,15 @@ def _handle_insights(handler, parsed) -> bool:
                     # Latest activity (ended_at preferred over started_at) so a
                     # long-running session ranks by recency, not by start time.
                     _ts = max(_safe_ts(row["ended_at"]), _safe_ts(row["started_at"]))
+                    # Date-window filter in Python (not SQL): a TEXT timestamp
+                    # compared against a numeric epoch in SQLite is always "greater"
+                    # (storage-class ordering), so the SQL predicate would let old
+                    # rows leak into the window. _safe_ts normalizes both shapes.
+                    # ponytail: loads all non-webui rows instead of date-pruning in
+                    # SQL; fine for a local single-profile DB, add a SQL ts filter
+                    # if state.db grows to millions of rows.
+                    if _ts < cutoff:
+                        continue
                     total_sessions += 1
                     total_messages += _msgs
                     total_input_tokens += _input
@@ -12014,8 +12022,12 @@ def _handle_insights(handler, parsed) -> bool:
                     })
 
                     if _ts:
-                        _dt = _time.localtime(_ts)
-                        _day_key = _time.strftime("%Y-%m-%d", _dt)
+                        # _dtt (not _dt): the loop must not shadow the `import
+                        # datetime as _dt` module that _safe_ts uses, or a later
+                        # ISO-timestamp row raises AttributeError and the outer
+                        # except silently drops that row and every row after it.
+                        _dtt = _time.localtime(_ts)
+                        _day_key = _time.strftime("%Y-%m-%d", _dtt)
                         _daily = daily_tokens.setdefault(_day_key, {
                             "input_tokens": 0,
                             "output_tokens": 0,
@@ -12028,8 +12040,8 @@ def _handle_insights(handler, parsed) -> bool:
                         _daily["cache_read_tokens"] += _cache_read
                         _daily["sessions"] += 1
                         _daily["cost"] += _cost
-                        dow_activity[_dt.tm_wday] += 1
-                        hod_activity[_dt.tm_hour] += 1
+                        dow_activity[_dtt.tm_wday] += 1
+                        hod_activity[_dtt.tm_hour] += 1
     except Exception:
         logger.debug("Failed to include CLI sessions in insights", exc_info=True)
 

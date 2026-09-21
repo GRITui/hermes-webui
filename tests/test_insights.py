@@ -691,3 +691,65 @@ def test_insights_top_sessions_table_has_contained_overflow():
     assert ".insights-top-sessions-table{overflow-x:auto;display:block;}" in STYLE_CSS
     assert "min-width:420px" in STYLE_CSS
 
+
+def test_insights_text_timestamps_respect_date_window(monkeypatch, tmp_path):
+    """A TEXT-timestamp row older than the window is excluded, not leaked in.
+
+    Regression: comparing a TEXT timestamp to a numeric epoch in the SQL WHERE
+    clause is always "greater" (storage-class ordering), so old rows leaked into
+    the window. The filter must run in Python via _safe_ts.
+    """
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    schema = (
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, "
+        "message_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+        "estimated_cost_usd REAL, started_at TEXT, ended_at TEXT)"
+    )
+    rows = [
+        # Within the 7-day window (relative to `now`).
+        {"id": "recent", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 100, "output_tokens": 10, "estimated_cost_usd": 0.01,
+         "started_at": "2026-05-30T12:00:00", "ended_at": "2026-05-30T12:00:00"},
+        # Years old — must be EXCLUDED from the 7-day window.
+        {"id": "ancient", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 5000, "output_tokens": 500, "estimated_cost_usd": 0.5,
+         "started_at": "2020-01-01T00:00:00", "ended_at": "2020-01-01T00:00:00"},
+    ]
+    data = _call_insights_state_db_schema(monkeypatch, tmp_path, [], rows, schema, days="7", now=now)
+    ids = {s["id"] for s in data["top_sessions"]}
+    assert "recent" in ids
+    assert "ancient" not in ids, "out-of-window text-ts session leaked into top_sessions"
+    assert data["total_sessions"] == 1  # ancient row not counted in the aggregate either
+
+
+def test_insights_multiple_iso_rows_not_truncated(monkeypatch, tmp_path):
+    """Two in-window ISO-timestamp rows must BOTH be counted.
+
+    Regression (Greptile P1): the state.db loop assigned ``_dt = _time.localtime(_ts)``
+    in its activity block, shadowing the ``import datetime as _dt`` module that
+    ``_safe_ts`` uses. After the first row, a later ISO-timestamp row raised
+    ``AttributeError`` at ``_dt.datetime.fromisoformat(...)``; the outer ``except``
+    stopped the loop and silently dropped that row and every row after it.
+    """
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    schema = (
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, "
+        "message_count INTEGER, input_tokens INTEGER, output_tokens INTEGER, "
+        "estimated_cost_usd REAL, started_at TEXT, ended_at TEXT)"
+    )
+    rows = [
+        # Both within the 7-day window, both ISO-string timestamps.
+        {"id": "iso-a", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 100, "output_tokens": 10, "estimated_cost_usd": 0.01,
+         "started_at": "2026-05-30T12:00:00", "ended_at": "2026-05-30T12:00:00"},
+        {"id": "iso-b", "source": "cli", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 200, "output_tokens": 20, "estimated_cost_usd": 0.02,
+         "started_at": "2026-05-29T12:00:00", "ended_at": "2026-05-29T12:00:00"},
+    ]
+    data = _call_insights_state_db_schema(monkeypatch, tmp_path, [], rows, schema, days="7", now=now)
+    ids = {s["id"] for s in data["top_sessions"]}
+    assert "iso-a" in ids and "iso-b" in ids, (
+        f"second ISO row truncated by _dt shadowing; got {sorted(ids)}")
+    assert data["total_sessions"] == 2
+    assert data["total_input_tokens"] == 300
+
