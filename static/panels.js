@@ -2627,7 +2627,12 @@ function _kanbanScrollBoards(){
   const board = $('kanbanBoard');
   if (!board) return [];
   const lanes = board.querySelectorAll('.kanban-board-in-lane');
-  return lanes.length ? Array.from(lanes) : [board];
+  if (lanes.length) return Array.from(lanes);
+  // Normal mode: the horizontal scroll container is the WRAPPER
+  // (.kanban-board-wrap has overflow:auto; #kanbanBoard itself has none and
+  // just grows to fit its columns). Scrolling the board was a no-op.
+  const wrap = board.closest('.kanban-board-wrap');
+  return wrap ? [wrap] : [board];
 }
 function scrollKanbanBoard(dir){
   const boards = _kanbanScrollBoards();
@@ -2651,8 +2656,10 @@ function kanbanBoardKeydown(event){
     case 'PageUp':     nudge(-step * 3); break;
     case 'Home':       scroll(0, {behavior: 'smooth'}); break;
     case 'End': {
-      const max = Math.max(...boards.map(b => b.scrollWidth - b.clientWidth));
-      scroll(max, {behavior: 'smooth'}); break;
+      // Each owner scrolls to its OWN end, not the widest lane's range
+      // applied to every lane (a shorter lane would overshoot and bounce).
+      boards.forEach(b => b.scrollTo({left: b.scrollWidth - b.clientWidth, behavior: 'smooth'}));
+      break;
     }
     default: handled = false;
   }
