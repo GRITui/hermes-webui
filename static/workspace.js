@@ -1282,6 +1282,15 @@ function renderFileBreadcrumb(filePath) {
 function openInBrowser(){
   if(!_previewCurrentPath||!S.session) return;
   const url=_workspaceRouteForPath(_previewCurrentPath, 'raw', {inline:true});
+  // Standalone PWA (iPhone "Add to Home Screen"): window.open('_blank') opens a
+  // chromeless window with NO address bar and NO back button, stranding the user
+  // with no way back to the app. Navigate the current window in-place instead so
+  // the PWA's built-in back button (history) carries them back. Regular browsers
+  // keep the new-tab behavior.
+  if(typeof _isPwaStandalone==='function' && _isPwaStandalone()){
+    window.location.href=url;
+    return;
+  }
   window.open(url,'_blank','noopener');
 }
 // openInBrowser keeps the helper-based raw path, which expands to an explicit &inline=1 URL.
